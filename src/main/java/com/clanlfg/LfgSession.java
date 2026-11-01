@@ -59,6 +59,16 @@ public class LfgSession
 
 		/** The saved token is no longer good. Delete it. */
 		void onTokenRejected(String rsn);
+
+		/** Whether you own the group (and so can change its password and remove members). Sent after connecting. */
+		default void onOwner(boolean owner, boolean hasPassword)
+		{
+		}
+
+		/** A short plain-language result of something the owner just did. */
+		default void onNotice(String text)
+		{
+		}
 	}
 
 	/** The version of the conversation with the server (see "Changing the protocol" in the server's README). Sent with every request. */
@@ -89,6 +99,7 @@ public class LfgSession
 	private String token;
 	private String selfId;
 	private boolean triedRejoin;
+	private boolean createRequested; // the first join attempt creates the group instead of joining it
 	private boolean noReconnect;
 	private boolean connected;
 	private WebSocket socket;
@@ -121,6 +132,12 @@ public class LfgSession
 	/** Starts (or restarts) a session for this player. savedToken may be null. */
 	public void start(String group, String groupPassword, String playerName, String savedToken)
 	{
+		start(group, groupPassword, playerName, savedToken, false);
+	}
+
+	/** Same, but with create = true the group is made (and you become its owner) instead of joined. */
+	public void start(String group, String groupPassword, String playerName, String savedToken, boolean create)
+	{
 		final long gen;
 		String usableToken = savedToken;
 		boolean dropSavedToken = false;
@@ -139,8 +156,9 @@ public class LfgSession
 				usableToken = null;
 			}
 			token = usableToken;
-			triedRejoin = false;
-			noReconnect = false;
+				triedRejoin = false;
+				createRequested = create;
+				noReconnect = false;
 			backoffMs = MIN_BACKOFF_MS;
 		}
 		if (dropSavedToken)
@@ -200,6 +218,42 @@ public class LfgSession
 		}
 	}
 
+	/** Owner only: removes a member and stops that name from rejoining. */
+	public void removeMember(String memberId)
+	{
+		JsonObject o = new JsonObject();
+		o.addProperty("t", "kick");
+		o.addProperty("id", memberId);
+		sendRaw(o);
+	}
+
+	/** Owner only: sets a new group password, or removes it when null. */
+	public void setGroupPassword(String newPassword)
+	{
+		JsonObject o = new JsonObject();
+		o.addProperty("t", "password");
+		if (newPassword == null)
+		{
+			o.add("password", com.google.gson.JsonNull.INSTANCE);
+		}
+		else
+		{
+			o.addProperty("password", newPassword);
+		}
+		sendRaw(o);
+	}
+
+	private void sendRaw(JsonObject o)
+	{
+		synchronized (lock)
+		{
+			if (socket != null && connected)
+			{
+				socket.send(o.toString());
+			}
+		}
+	}
+
 	/** Deletes your membership (and all data about you) on the server, then disconnects. */
 	public void leave(Consumer<Boolean> done)
 	{
@@ -255,6 +309,7 @@ public class LfgSession
 		final String joinGroup;
 		final String joinPassword;
 		final String name;
+		final boolean wantCreate;
 		synchronized (lock)
 		{
 			if (gen != generation)
@@ -264,14 +319,19 @@ public class LfgSession
 			joinGroup = groupName;
 			joinPassword = password;
 			name = rsn;
+			wantCreate = createRequested;
 		}
-		emit(gen, State.JOINING, "Joining group…");
+		emit(gen, State.JOINING, wantCreate ? "Creating group…" : "Joining group…");
 
 		JsonObject body = new JsonObject();
 		body.addProperty("group", joinGroup);
 		body.addProperty("password", joinPassword);
-		body.addProperty("rsn", name);
-		Request req = new Request.Builder()
+			body.addProperty("rsn", name);
+			if (wantCreate)
+			{
+				body.addProperty("create", true);
+			}
+			Request req = new Request.Builder()
 			.url(baseUrl + "/v1/join")
 			.header(PROTOCOL_HEADER, String.valueOf(PROTOCOL_VERSION))
 			.post(RequestBody.create(JSON, body.toString()))
@@ -316,6 +376,10 @@ public class LfgSession
 			return;
 		}
 		JsonObject obj = parseObject(text);
+		synchronized (lock)
+		{
+			createRequested = false; // creating is a one-off; retries and re-logins only ever join
+		}
 		if (status == 200 && obj != null && str(obj, "token") != null)
 		{
 			String newToken = str(obj, "token");
@@ -330,10 +394,28 @@ public class LfgSession
 		String error = obj == null ? "" : String.valueOf(str(obj, "error"));
 		switch (error)
 		{
-			case "invalid_code":
-			case "bad_request":
-				emit(gen, State.BAD_CODE, "That group name or password isn't right. Check them and try again.");
-				break;
+				case "invalid_code":
+				case "bad_request":
+					emit(gen, State.BAD_CODE, "That group name or password isn't right. Check them and try again.");
+					break;
+				case "no_such_group":
+					emit(gen, State.BAD_CODE, "There's no group with that name. Check the spelling, or create it.");
+					break;
+				case "group_exists":
+					emit(gen, State.BAD_CODE, "A group with that name already exists. If it's yours, use Join with its password.");
+					break;
+				case "weak_password":
+					emit(gen, State.BAD_CODE, "Use a password of at least 6 characters, or leave it empty.");
+					break;
+				case "creation_limited":
+					emit(gen, State.BAD_CODE, "You've created the most groups allowed for today. Try again tomorrow.");
+					break;
+				case "creation_closed":
+					emit(gen, State.BAD_CODE, "Creating new groups is switched off for now.");
+					break;
+				case "creation_full":
+					emit(gen, State.BAD_CODE, "The server can't take any more groups right now.");
+					break;
 			case "update_required":
 				markOutdated(gen);
 				break;
@@ -566,8 +648,10 @@ public class LfgSession
 			{
 				case "hello":
 				{
-					String groupName = str(msg, "group");
-					synchronized (lock)
+						String groupName = str(msg, "group");
+						boolean owner = bool(msg, "owner");
+						boolean hasPassword = bool(msg, "hasPassword");
+						synchronized (lock)
 					{
 						connected = true;
 						backoffMs = MIN_BACKOFF_MS;
@@ -576,10 +660,40 @@ public class LfgSession
 						replaceMembersLocked(msg.get("members"));
 						sendPresenceLocked();
 					}
-					emit(gen, State.CONNECTED, groupName == null ? "Connected" : groupName);
-					emitMembers(gen);
-					break;
-				}
+						emit(gen, State.CONNECTED, groupName == null ? "Connected" : groupName);
+						listener.onOwner(owner, hasPassword);
+						emitMembers(gen);
+						break;
+					}
+					case "ok":
+					{
+						String what = str(msg, "what");
+						if ("password".equals(what))
+						{
+							boolean has = bool(msg, "hasPassword");
+							listener.onOwner(true, has);
+							listener.onNotice(has ? "Password changed. Share the new one with your group."
+								: "Password removed. Anyone who knows the group's name can join.");
+						}
+						else if ("kick".equals(what))
+						{
+							listener.onNotice("Member removed.");
+						}
+						break;
+					}
+					case "error":
+					{
+						String error = str(msg, "error");
+						if ("weak_password".equals(error))
+						{
+							listener.onNotice("Use a password of at least 6 characters.");
+						}
+						else if ("forbidden".equals(error))
+						{
+							listener.onNotice("Only the group's owner can do that.");
+						}
+						break;
+					}
 				case "snapshot":
 					synchronized (lock)
 					{
@@ -837,6 +951,12 @@ public class LfgSession
 	{
 		JsonElement el = o.get(key);
 		return el != null && el.isJsonPrimitive() && el.getAsJsonPrimitive().isString() ? el.getAsString() : null;
+	}
+
+	static boolean bool(JsonObject o, String key)
+	{
+		JsonElement el = o.get(key);
+		return el != null && el.isJsonPrimitive() && el.getAsJsonPrimitive().isBoolean() && el.getAsBoolean();
 	}
 
 	static long lng(JsonObject o, String key, long fallback)

@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
 
 @PluginDescriptor(
 	name = "Clan LFG",
-	description = "Tell your clan or friends group what content you're up for, and see who else is. Needs a group name and password from your group's admin, and shares your choices with the group through the plugin's server.",
+description = "Tell your clan or friends group what content you're up for, and see who else is. Join a group by name (and password), or create your own. Your choices are shared with the group through the plugin's server.",
 	tags = {"clan", "lfg", "group", "raids", "social", "friends", "looking for group"}
 )
 public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, LfgSession.Listener
@@ -94,8 +94,10 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 	private volatile long visibleUntil; // local epoch ms, 0 = until logout
 
 	// Login tracking (only touched on the client thread, except where noted)
-	private boolean wantStart;
-	private String sessionRsn;
+	private volatile boolean wantStart;
+	private volatile String sessionRsn;
+	private volatile boolean pendingCreate; // the next connection creates the group instead of joining it
+	private volatile boolean changingPasswordHere; // we saved a new group password ourselves; do not reconnect for it
 	private volatile int currentWorld;
 
 	@Provides
@@ -221,6 +223,10 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
+		if (ClanLfgConfig.GROUP.equals(event.getGroup()) && "groupPassword".equals(event.getKey()) && changingPasswordHere)
+		{
+			return;
+		}
 		if (ClanLfgConfig.GROUP.equals(event.getGroup())
 			&& ("groupName".equals(event.getKey()) || "groupPassword".equals(event.getKey())))
 		{
@@ -243,7 +249,9 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 			panel.setVisibleChecked(visible);
 		}
 		String token = configManager.getConfiguration(ClanLfgConfig.GROUP, tokenKey(rsn));
-		session.start(config.groupName(), config.groupPassword(), rsn, token);
+		boolean create = pendingCreate;
+		pendingCreate = false;
+		session.start(config.groupName(), config.groupPassword(), rsn, token, create);
 		pushPresence();
 	}
 
@@ -308,11 +316,47 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 	}
 
 	@Override
-	public void onJoin(String groupName, String password)
+	public void onJoin(String groupName, String password, boolean create)
 	{
-		// Saving these triggers onConfigChanged, which reconnects.
+		pendingCreate = create;
+		// Saving these triggers onConfigChanged, which reconnects (but only if they changed)...
 		configManager.setConfiguration(ClanLfgConfig.GROUP, "groupName", groupName.trim());
 		configManager.setConfiguration(ClanLfgConfig.GROUP, "groupPassword", password.trim());
+		// ...so ask for a reconnect explicitly too, for when somebody tries the same thing again.
+		sessionRsn = null;
+		if (client.getGameState() == GameState.LOGGED_IN)
+		{
+			wantStart = true;
+		}
+	}
+
+	@Override
+	public void onRemoveMember(Member member)
+	{
+		if (session != null)
+		{
+			session.removeMember(member.getId());
+		}
+	}
+
+	@Override
+	public void onChangePassword(String newPassword)
+	{
+		if (session == null)
+		{
+			return;
+		}
+		session.setGroupPassword(newPassword);
+		// Keep our own saved copy in step, so signing in again later still works. No reconnect needed.
+		changingPasswordHere = true;
+		try
+		{
+			configManager.setConfiguration(ClanLfgConfig.GROUP, "groupPassword", newPassword == null ? "" : newPassword);
+		}
+		finally
+		{
+			changingPasswordHere = false;
+		}
 	}
 
 	@Override
@@ -441,6 +485,24 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 	private static String plain(String s)
 	{
 		return s.replace("<", "").replace(">", "");
+	}
+
+	@Override
+	public void onOwner(boolean owner, boolean hasPassword)
+	{
+		if (panel != null)
+		{
+			panel.setOwner(owner, hasPassword);
+		}
+	}
+
+	@Override
+	public void onNotice(String text)
+	{
+		if (panel != null)
+		{
+			panel.setNotice(text);
+		}
 	}
 
 	@Override

@@ -69,9 +69,15 @@ public class ClanLfgPanel extends PluginPanel
 
 		void onAlertsChanged(boolean enabled);
 
-		void onJoin(String groupName, String password);
+		void onJoin(String groupName, String password, boolean create);
 
 		void onLeaveGroup();
+
+		/** Owner only: remove this member from the group. */
+		void onRemoveMember(Member member);
+
+		/** Owner only: a new group password, or null to remove the password. */
+		void onChangePassword(String newPassword);
 	}
 
 	private static final String CARD_JOIN = "join";
@@ -174,6 +180,11 @@ public class ClanLfgPanel extends PluginPanel
 	private final JPanel listPanel = new JPanel();
 	private final JLabel footer = new JLabel(" ");
 	private final JButton leaveButton = new JButton("Leave group");
+	private final JPanel ownerBox = column();
+	private final JLabel ownerNotice = new JLabel(" ");
+	private final JButton removePasswordButton = new JButton("Remove password");
+	private boolean owner;
+	private boolean groupHasPassword;
 
 	// state (touched only on the Swing thread)
 	private final Set<Tag> mine = EnumSet.noneOf(Tag.class);
@@ -242,6 +253,23 @@ public class ClanLfgPanel extends PluginPanel
 		});
 	}
 
+	/** Whether you own this group. Owners get the password and member controls. */
+	public void setOwner(boolean isOwner, boolean hasPassword)
+	{
+		onEdt(() ->
+		{
+			owner = isOwner;
+			groupHasPassword = hasPassword;
+			render();
+		});
+	}
+
+	/** Shows the result of something the owner just did. */
+	public void setNotice(String text)
+	{
+		onEdt(() -> setWrappedText(ownerNotice, esc(text == null ? "" : text), CONTENT_WIDTH));
+	}
+
 	public void setMembers(List<Member> list, long offsetMs)
 	{
 		final List<Member> copy = new ArrayList<>(list);
@@ -296,7 +324,7 @@ public class ClanLfgPanel extends PluginPanel
 		JPanel p = column();
 		p.add(heading("Clan LFG"));
 		p.add(gap(6));
-		p.add(note("Type your group's name and the password from your clan admin to see who is online and open to group content."));
+		p.add(note("Join your clan's group with its name and password, or create a group for your clan or friends."));
 		p.add(gap(8));
 		p.add(small("Group name"));
 		nameField.setFont(nameField.getFont().deriveFont(textSize()));
@@ -305,7 +333,7 @@ public class ClanLfgPanel extends PluginPanel
 		nameField.setToolTipText("For example: My Clan (capitals and spaces don't matter)");
 		p.add(nameField);
 		p.add(gap(6));
-		p.add(small("Password (if there is one)"));
+		p.add(small("Password (optional)"));
 		for (javax.swing.text.JTextComponent f : new javax.swing.text.JTextComponent[] {nameField, passwordField})
 		{
 			f.setBackground(ColorScheme.DARKER_GRAY_COLOR);
@@ -320,33 +348,103 @@ public class ClanLfgPanel extends PluginPanel
 		JButton join = new JButton("Join group");
 		join.setFont(join.getFont().deriveFont(textSize()));
 		join.setAlignmentX(LEFT_ALIGNMENT);
-		join.addActionListener(e ->
-		{
-			String name = nameField.getText().trim();
-			if (name.isEmpty())
-			{
-				setWrappedText(joinMessage, "Type your group's name first.", CONTENT_WIDTH);
-				return;
-			}
-			if (GroupName.slug(name) == null)
-			{
-				setWrappedText(joinMessage, "That doesn't look like a group name. Type it the way your clan calls it, for example My Clan.", CONTENT_WIDTH);
-				return;
-			}
-			joinMessage.setText(" ");
-			callbacks.onJoin(name, new String(passwordField.getPassword()));
-		});
+		join.addActionListener(e -> submitJoin(false));
 		nameField.addActionListener(e -> passwordField.requestFocusInWindow());
 		passwordField.addActionListener(e -> join.doClick());
 		p.add(join);
+		p.add(gap(4));
+		JButton create = new JButton("Create new group");
+		create.setFont(create.getFont().deriveFont(textSize()));
+		create.setAlignmentX(LEFT_ALIGNMENT);
+		create.setToolTipText("Start a group with this name. You become its owner and can change the password or remove members.");
+		create.addActionListener(e -> submitJoin(true));
+		p.add(create);
 		p.add(gap(6));
 		joinMessage.setFont(joinMessage.getFont().deriveFont(textSize()));
 		joinMessage.setAlignmentX(LEFT_ALIGNMENT);
 		joinMessage.setForeground(AMBER);
 		p.add(joinMessage);
 		p.add(gap(10));
+		p.add(note("Creating a group? A password keeps strangers out. With none, anyone who knows the group's name can join."));
+		p.add(gap(6));
 		p.add(note("Only your player name, the content you pick and your optional message are shared, and only with members of your group. Nothing is shared until you pick something, and you can switch \"Show me to group\" off at any time."));
 		return p;
+	}
+
+	private void submitJoin(boolean create)
+	{
+		String name = nameField.getText().trim();
+		String password = new String(passwordField.getPassword()).trim();
+		if (name.isEmpty())
+		{
+			setWrappedText(joinMessage, "Type your group's name first.", CONTENT_WIDTH);
+			return;
+		}
+		if (GroupName.slug(name) == null)
+		{
+			setWrappedText(joinMessage, "That doesn't look like a group name. Type it the way your clan calls it, for example My Clan.", CONTENT_WIDTH);
+			return;
+		}
+		if (create && !password.isEmpty() && password.length() < 6)
+		{
+			setWrappedText(joinMessage, "Use a password of at least 6 characters, or leave it empty.", CONTENT_WIDTH);
+			return;
+		}
+		if (create && password.isEmpty())
+		{
+			int answer = JOptionPane.showConfirmDialog(this,
+				"Create \"" + name + "\" with no password?\nAnyone who knows or guesses the name will be able to join and see who is open to what.\nYou can add a password later.",
+				"Create group", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE);
+			if (answer != JOptionPane.OK_OPTION)
+			{
+				return;
+			}
+		}
+		joinMessage.setText(" ");
+		callbacks.onJoin(name, password, create);
+	}
+
+	private void changePassword()
+	{
+		JPasswordField field = new JPasswordField(16);
+		Object[] content = {"New password (at least 6 characters).\nPeople already in the group stay in. Share the new one with the people you want to join.", field};
+		int answer = JOptionPane.showConfirmDialog(this, content, "Change password", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+		if (answer != JOptionPane.OK_OPTION)
+		{
+			return;
+		}
+		String pw = new String(field.getPassword()).trim();
+		if (pw.length() < 6)
+		{
+			setWrappedText(ownerNotice, "Use a password of at least 6 characters.", CONTENT_WIDTH);
+			return;
+		}
+		callbacks.onChangePassword(pw);
+	}
+
+	private void removePassword()
+	{
+		int answer = JOptionPane.showConfirmDialog(this,
+			"Remove the password?\nAnyone who knows the group's name will be able to join.",
+			"Remove password", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+		if (answer == JOptionPane.OK_OPTION)
+		{
+			callbacks.onChangePassword(null);
+		}
+	}
+
+	private void confirmRemove(Member m)
+	{
+		String advice = groupHasPassword
+			? "To keep them out for good, change the password too."
+			: "Your group has no password, so they could join again under another name. Set a password to lock it.";
+		int answer = JOptionPane.showConfirmDialog(this,
+			"Remove " + m.getRsn() + " from the group?\nThey can't rejoin under that name.\n" + advice,
+			"Remove member", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE);
+		if (answer == JOptionPane.OK_OPTION)
+		{
+			callbacks.onRemoveMember(m);
+		}
 	}
 
 	private JPanel buildMainCard(VisibleFor initialDuration)
@@ -492,6 +590,28 @@ public class ClanLfgPanel extends PluginPanel
 		footer.setAlignmentX(LEFT_ALIGNMENT);
 		p.add(footer);
 		p.add(gap(6));
+		ownerBox.setAlignmentX(LEFT_ALIGNMENT);
+		ownerBox.add(small("You own this group"));
+		ownerBox.add(gap(4));
+		JButton changePw = new JButton("Change password");
+		changePw.setFont(changePw.getFont().deriveFont(textSize()));
+		changePw.setAlignmentX(LEFT_ALIGNMENT);
+		changePw.addActionListener(e -> changePassword());
+		ownerBox.add(changePw);
+		ownerBox.add(gap(4));
+		removePasswordButton.setFont(removePasswordButton.getFont().deriveFont(textSize()));
+		removePasswordButton.setAlignmentX(LEFT_ALIGNMENT);
+		removePasswordButton.addActionListener(e -> removePassword());
+		ownerBox.add(removePasswordButton);
+		ownerBox.add(gap(4));
+		ownerNotice.setFont(ownerNotice.getFont().deriveFont(textSize()));
+		ownerNotice.setForeground(AMBER);
+		ownerNotice.setAlignmentX(LEFT_ALIGNMENT);
+		ownerBox.add(ownerNotice);
+		ownerBox.add(small("Right-click someone in the list to remove them."));
+		ownerBox.add(gap(8));
+		ownerBox.setVisible(false);
+		p.add(ownerBox);
 		leaveButton.setFont(leaveButton.getFont().deriveFont(textSize()));
 		leaveButton.setAlignmentX(LEFT_ALIGNMENT);
 		leaveButton.addActionListener(e ->
@@ -775,6 +895,8 @@ public class ClanLfgPanel extends PluginPanel
 		statusLabel.setText("<html><font color='" + hex(dot) + "'>●</font>&nbsp;" + esc(text) + "</html>");
 		statusLabel.setForeground(MUTED);
 		leaveButton.setVisible(state == LfgSession.State.CONNECTED || state == LfgSession.State.PENDING);
+		ownerBox.setVisible(owner && state == LfgSession.State.CONNECTED);
+		removePasswordButton.setVisible(groupHasPassword);
 		renderHint();
 		renderList();
 	}
@@ -949,6 +1071,15 @@ public class ClanLfgPanel extends PluginPanel
 		setWrappedText(text, "<b>" + esc(m.getRsn()) + "</b><br>"
 			+ "<font color='" + hex(MUTED) + "'>" + where + left + "</font>" + message, ROW_TEXT_WIDTH);
 		row.add(text, BorderLayout.CENTER);
+		if (owner)
+		{
+			javax.swing.JPopupMenu menu = new javax.swing.JPopupMenu();
+			javax.swing.JMenuItem remove = new javax.swing.JMenuItem("Remove from group");
+			remove.addActionListener(e -> confirmRemove(m));
+			menu.add(remove);
+			row.setComponentPopupMenu(menu);
+			text.setInheritsPopupMenu(true);
+		}
 
 		row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
 		return row;

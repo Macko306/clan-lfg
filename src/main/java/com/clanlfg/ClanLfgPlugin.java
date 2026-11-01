@@ -14,6 +14,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -27,10 +28,12 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.SpriteManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.ImageUtil;
 import okhttp3.OkHttpClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +46,9 @@ description = "Tell your clan or friends group what content you're up for, and s
 public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, LfgSession.Listener
 {
 	private static final Logger log = LoggerFactory.getLogger(ClanLfgPlugin.class);
+
+	/** The game's Grouping tab icon (SpriteID.SideIcons). */
+	private static final int GROUPING_SPRITE = 3555;
 
 	private static final String KEY_TAGS = "tags";
 	private static final String KEY_DURATION = "duration";
@@ -64,6 +70,9 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 
 	@Inject
 	private ChatMessageManager chatMessageManager;
+
+	@Inject
+	private SpriteManager spriteManager;
 
 	@Inject
 	private ClientThread clientThread;
@@ -127,6 +136,8 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 			.panel(panel)
 			.build();
 		clientToolbar.addNavigation(navButton);
+		// Swap in the game's own Grouping tab icon once the client can supply it.
+		spriteManager.getSpriteAsync(GROUPING_SPRITE, 0, this::useGameIcon);
 
 		tickTask = executor.scheduleWithFixedDelay(this::tick, 15, 15, TimeUnit.SECONDS);
 
@@ -664,6 +675,30 @@ public class ClanLfgPlugin extends Plugin implements ClanLfgPanel.Callbacks, Lfg
 	static String tokenKey(String rsn)
 	{
 		return "token_" + rsn.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "_");
+	}
+
+	/** The navigation button cannot change its icon, so replace it with one that has the game's picture. */
+	private void useGameIcon(BufferedImage sprite)
+	{
+		if (sprite == null || navButton == null || panel == null)
+		{
+			return;
+		}
+		SwingUtilities.invokeLater(() ->
+		{
+			if (navButton == null || panel == null)
+			{
+				return;
+			}
+			clientToolbar.removeNavigation(navButton);
+			navButton = NavigationButton.builder()
+				.tooltip("Clan LFG")
+				.icon(ImageUtil.resizeImage(sprite, 16, 16))
+				.priority(7)
+				.panel(panel)
+				.build();
+			clientToolbar.addNavigation(navButton);
+		});
 	}
 
 	/** A tiny two-people icon drawn in code, so the plugin needs no image files. */

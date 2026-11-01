@@ -1,20 +1,15 @@
 # Clan LFG
 
-A RuneLite plugin for clans and friends groups. You pick the content you're up for, add a short message if you
-like, and everyone in your group can see who is online and open to what. It's meant to replace the "anyone up for
-ToB?" messages in clan chat with a list you can glance at.
-
-The plugin only shows information. Reaching out is up to you, in game, the way you normally would.
+A RuneLite plugin for clans and friends groups. It's intended to make grouping easier. You pick the content you're up for, add a short message if you
+like, and everyone in your group can see who is online and what content they want to send.
 
 ## What it does
 
 - **Pick what you're open to.** Content is grouped: Raids (CoX, ToB, ToA, TFA), Group bosses (GWD, Royal Titans,
   Nex, Corp, Nightmare, Yama, Hueycoatl, Dagannoth Kings, Kalphite Queen), Wilderness (each boss, Wilderness
   Agility, Revenants, PKing), Skilling content (Wintertodt, Tempoross, Zalcano, Guardians of the Rift, Volcanic
-  Mine), Minigames, Other PvM and General (Skilling, Games, Learning, Teaching, Social). Each one has its
-  in-game item as an icon.
-- **Add a message.** Up to 80 characters, shown under your name, like "ToB - taking learners" or "AFK, pm me if
-  you want to join".
+  Mine), Minigames, Other PvM and General (Skilling, Games, Learning, Teaching, Social). 
+- **Add a message.** Up to 80 characters, shown under your name, like "ToB - taking learners" or "AFKing - pm me and ill join".
 - **See who else is open.** The list is grouped by content, so you can find everyone open to ToB in one place.
   Tick **Only my picks** to see just the content you picked, or use **Filter** to narrow it further.
 - **Get told when someone opens up.** With **Alert me in chat** on, a line appears in your own chat box when
@@ -100,21 +95,9 @@ If you'd rather not depend on my server, the [server repository](https://github.
 explains how to run your own on a free Cloudflare account. Be aware that the plugin from the Plugin Hub always
 talks to my server, so your own server would need a build of the plugin pointed at it.
 
-## Building from source
-
-You need JDK 11 or newer.
-
-```
-./gradlew build
-./gradlew run
-```
-
-`run` starts RuneLite in developer mode with the plugin loaded. To test against a server on your own computer,
-see the server repository, then run `./gradlew run -Pserver=http://localhost:8787`.
-
 ## Support
 
-Bugs and ideas are welcome as issues. Clan LFG is an independent plugin and isn't affiliated with Jagex or RuneLite.
+Happy to continue development, let me know if you find any issues or have improvements/suggestions. Clan LFG is an independent plugin and isn't affiliated with Jagex or RuneLite.
 
 ## License
 
